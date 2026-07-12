@@ -1,6 +1,11 @@
 // background.js —— MV3 service worker，负责编排批量采集任务
-let job = null;
+importScripts('radar.js');
+importScripts('supabase.js');
+
 let keepalivePort = null;
+let pumpLock = false; // 防止 alarm 与 setTimeout 并发处理同一批任务
+const QUEUE_CAP = 3000; // 递归队列硬上限，避免 depth=3 指数爆炸拖垮浏览器
+const JOB_KEY = 'job';
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -19,6 +24,21 @@ chrome.runtime.onConnect.addListener((port) => {
     });
   }
 });
+
+// ============ job 状态：以 chrome.storage 为唯一事实源 ============
+// 第一性原理：MV3 SW 易失，任何只活在内存里的任务状态都会随 SW 回收而丢失。
+// 因此 job 全程序列化存 storage（不含 Set/Map），SW 死后从 storage 重建即可续跑。
+async function loadJob() {
+  return new Promise((resolve) => chrome.storage.local.get([JOB_KEY], (s) => resolve(s[JOB_KEY] || null)));
+}
+async function saveJob(job) {
+  await chrome.storage.local.set({ [JOB_KEY]: job });
+}
+function pct(job) {
+  const est = job.done + job.queue.length;
+  if (est <= 0) return 100;
+  return Math.min(99, Math.round((job.done / est) * 100));
+}
 
 async function ensureTab() {
   const existing = await chrome.tabs.query({ url: '*://*.xiaohongshu.com/*' });
@@ -91,7 +111,7 @@ async function sendToContent(tabId, msg, retries) {
       await sleep(700);
     }
   }
-  return { ok: false, error: 'content script 无响应（页面未就绪？）' };
+  return { ok: false, error: '内容脚本无响应（页面未就绪？）' };
 }
 
 // 等待页面 + 搜索框就绪（区分"未登录"与"DOM 未渲染"）
@@ -105,72 +125,64 @@ async function waitReady(tabId, timeout = 15000) {
   return false;
 }
 
-function saveState() {
-  if (!job) return;
-  chrome.storage.local.set({
-    job: {
-      running: job.running,
-      done: job.done,
-      remaining: job.queue.length,
-      collected: job.results.length
-    },
-    results: job.results
-  });
+// 调度下一步：setTimeout 提供"SW 存活时"的快速节奏；alarm 是 SW 死后复活的安全网
+function scheduleTick(delay) {
+  ensurePumpAlarm();
+  setTimeout(() => pumpJob(), delay);
+}
+function ensurePumpAlarm() {
+  // 最小周期 0.5min=30s；正常由 setTimeout 驱动，alarm 仅在 SW 被回收后兜底唤醒
+  chrome.alarms.create('job-pump', { periodInMinutes: 0.5 });
 }
 
-function pct() {
-  if (!job) return 0;
-  const est = job.done + job.queue.length;
-  if (est <= 0) return 100;
-  return Math.min(99, Math.round((job.done / est) * 100));
-}
-
-async function startBatch(seeds, depth, delay) {
-  let tabId;
+// 步进式处理：每次只处理一个词，处理完立刻落盘，再决定下一步
+async function pumpJob() {
+  if (pumpLock) return; // 防止 alarm 与 setTimeout 并发
+  pumpLock = true;
   try {
-    tabId = await ensureTab();
-  } catch (e) {
-    broadcast({ type: 'warn', message: '无法打开小红书页面：' + (e && e.message || e) });
-    broadcast({ type: 'finished', total: 0 });
-    return;
-  }
-
-  const ready = await waitReady(tabId);
-  if (!ready) {
-    broadcast({
-      type: 'warn',
-      message: '小红书页面未就绪：可能未登录或搜索框未出现。请打开小红书登录后重试'
-    });
-    broadcast({ type: 'finished', total: 0 });
-    return;
-  }
-
-  // 确保联想请求拦截器已注入
-  await injectMain(tabId);
-
-  job = {
-    running: true,
-    stop: false,
-    depth: depth,
-    delay: delay,
-    queue: seeds.map((s) => ({ kw: s, level: 1 })),
-    visited: new Set(),
-    added: new Set(),
-    results: [],
-    done: 0,
-    emptyStreak: 0
-  };
-
-  broadcast({ type: 'started', total: job.queue.length });
-  saveState();
-
-  while (job.running && job.queue.length && !job.stop) {
-    const item = job.queue.shift();
-    if (job.visited.has(item.kw)) {
-      job.done++;
-      continue;
+    let job = await loadJob();
+    if (!job || !job.running || job.stop) {
+      if (job && (job.stop || job.queue.length === 0)) await finalizeJob(job);
+      return;
     }
-    job.visited.add(item.kw);
+    if (job.queue.length === 0) { await finalizeJob(job); return; }
+
+    // —— 初始化阶段（一次性）：准备标签页 + 登录预检 ——
+    if (job.phase === 'init') {
+      let tabId;
+      try { tabId = await ensureTab(); }
+      catch (e) {
+        broadcast({ type: 'warn', message: '无法打开小红书页面：' + (e && e.message || e) });
+        job.stop = true; job.running = false; await saveJob(job);
+        await finalizeJob(job);
+        return;
+      }
+      const ready = await waitReady(tabId);
+      if (!ready) {
+        broadcast({ type: 'warn', message: '小红书页面未就绪：可能未登录或搜索框未出现。请打开小红书登录后重试' });
+        job.stop = true; job.running = false; await saveJob(job);
+        await finalizeJob(job);
+        return;
+      }
+      await injectMain(tabId);
+      job.tabId = tabId;
+      job.phase = 'running';
+      await saveJob(job);
+      broadcast({ type: 'started', total: job.queue.length });
+      scheduleTick(job.delay);
+      return;
+    }
+
+    // —— 运行阶段：处理队列头一个词 ——
+    const item = job.queue.shift();
+    if (job.visited.includes(item.kw)) {
+      job.done++;
+      await saveJob(job);
+      if (job.queue.length === 0 || job.stop) { await finalizeJob(job); return; }
+      scheduleTick(job.delay);
+      return;
+    }
+    job.visited.push(item.kw);
 
     broadcast({
       type: 'progress',
@@ -179,26 +191,31 @@ async function startBatch(seeds, depth, delay) {
       done: job.done,
       remaining: job.queue.length,
       collected: job.results.length,
-      pct: pct()
+      pct: pct(job)
     });
 
-    const resp = await sendToContent(tabId, { action: 'collectFor', keyword: item.kw });
+    const resp = await sendToContent(job.tabId, { action: 'collectFor', keyword: item.kw });
     const stepItems = [];
 
     if (resp && resp.ok) {
-      if (resp.suggestions.length === 0) {
+      if (!resp.suggestions || resp.suggestions.length === 0) {
         job.emptyStreak++;
       } else {
         job.emptyStreak = 0;
         for (const w of resp.suggestions) {
-          if (!job.added.has(w)) {
-            job.added.add(w);
+          if (!job.added.includes(w)) {
+            job.added.push(w);
             const entry = { seed: item.kw, level: item.level, word: w };
             job.results.push(entry);
             stepItems.push(entry);
           }
-          if (item.level < job.depth && !job.visited.has(w)) {
-            job.queue.push({ kw: w, level: item.level + 1 });
+          // 递归下钻：仅当未访问、未收集、且队列未触顶
+          if (item.level < job.depth && !job.visited.includes(w) && !job.added.includes(w)) {
+            if (job.queue.length < QUEUE_CAP) {
+              job.queue.push({ kw: w, level: item.level + 1 });
+            } else if (!job.truncated) {
+              job.truncated = true; // 标记截断，finalize 时提示
+            }
           }
         }
       }
@@ -208,7 +225,7 @@ async function startBatch(seeds, depth, delay) {
         broadcast({ type: 'warn', message: `「${item.kw}」失败：${resp.error}` });
       }
       // 标签页被用户关闭 → 终止
-      if (!(await tabExists(tabId))) {
+      if (!(await tabExists(job.tabId))) {
         broadcast({ type: 'warn', message: '小红书标签页已关闭，任务终止' });
         job.stop = true;
       }
@@ -224,7 +241,7 @@ async function startBatch(seeds, depth, delay) {
     }
 
     job.done++;
-    saveState();
+    await saveJob(job);
     broadcast({
       type: 'progress',
       current: item.kw,
@@ -232,45 +249,197 @@ async function startBatch(seeds, depth, delay) {
       done: job.done,
       remaining: job.queue.length,
       collected: job.results.length,
-      pct: pct(),
+      pct: pct(job),
       items: stepItems
     });
 
-    if (job.stop) break;
-    await sleep(job.delay);
+    if (job.stop || job.queue.length === 0) { await finalizeJob(job); return; }
+    scheduleTick(job.delay);
+  } catch (e) {
+    // 任意意外错误：暂停而非无限空转，避免 SW 反复崩溃
+    try {
+      const j = await loadJob();
+      if (j) { j.stop = true; await saveJob(j); }
+    } catch (_) {}
+  } finally {
+    pumpLock = false;
   }
-
-  job.running = false;
-  saveState();
-  broadcast({ type: 'finished', total: job.results.length });
 }
+
+async function finalizeJob(job) {
+  job.running = false;
+  job.phase = 'done';
+  await saveJob(job);
+  chrome.alarms.clear('job-pump');
+  broadcast({ type: 'finished', total: job.results.length });
+  // 存入历史
+  historyPush({
+    id: 'b' + (job.startedAt || Date.now()),
+    ts: Date.now(),
+    kind: '采集',
+    title: (job.seeds || []).length + '种子词·depth' + job.depth,
+    detail: job.results.length + '词' + (job.truncated ? '（队列超限已截断）' : ''),
+    payload: { type: 'batch', seeds: job.seeds, depth: job.depth, results: job.results.slice(0, 500) }
+  });
+}
+
+async function startBatch(seeds, depth, delay) {
+  const existing = await loadJob();
+  if (existing && existing.running) {
+    broadcast({ type: 'warn', message: '已有任务在运行，请先停止' });
+    return;
+  }
+  const job = {
+    running: true,
+    stop: false,
+    phase: 'init',
+    depth: depth,
+    delay: delay,
+    tabId: null,
+    queue: seeds.map((s) => ({ kw: s, level: 1 })),
+    visited: [],
+    added: [],
+    results: [],
+    done: 0,
+    emptyStreak: 0,
+    seeds: seeds,
+    startedAt: Date.now(),
+    truncated: false
+  };
+  ensurePumpAlarm();
+  await saveJob(job);
+  pumpJob();
+}
+
+async function stopBatch() {
+  const job = await loadJob();
+  if (job) { job.stop = true; await saveJob(job); }
+  chrome.alarms.clear('job-pump');
+  pumpJob(); // 尽快进入 finalize
+}
+
+function loadSettingsSeeds() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['settings'], (s) => {
+      const t = (s.settings && s.settings.seeds) || '';
+      const seeds = t.split('\n').map((x) => x.trim()).filter(Boolean);
+      resolve(seeds);
+    });
+  });
+}
+
+// —— 全历史记录（采集批次 + 快照） ——
+async function historyLoad() {
+  return new Promise((resolve) => chrome.storage.local.get(['history'], (s) => resolve(s.history || [])));
+}
+async function historySave(h) {
+  await chrome.storage.local.set({ history: h });
+}
+async function historyPush(entry) {
+  let h = await historyLoad();
+  h = h.filter((e) => e.id !== entry.id);
+  h.push(entry);
+  h.sort((a, b) => b.ts - a.ts);
+  if (h.length > 100) h = h.slice(0, 100);
+  await historySave(h);
+  sbPushHistory(entry); // 已登录则云同步，未登录 no-op
+  broadcast({ type: 'historyUpdate' });
+}
+
+// 删除单条历史：本地按 id 过滤；已登录则同步删除云端（未登录 no-op）
+async function deleteHistory(id) {
+  if (!id) return false;
+  let h = await historyLoad();
+  const before = h.length;
+  h = h.filter((e) => e.id !== id);
+  const deleted = h.length !== before;
+  if (deleted) await historySave(h);
+  try { await sbDeleteHistory(id); } catch (e) {}
+  broadcast({ type: 'historyUpdate' });
+  return deleted;
+}
+
+// —— 上升趋势雷达：每日定时快照 ——
+function nextRunTime(h, m) {
+  const d = new Date();
+  d.setHours(h, m, 0, 0);
+  if (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1);
+  return d.getTime();
+}
+
+async function ensureRadarAlarm() {
+  const sch = await radarLoadSchedule();
+  if (sch.enabled) {
+    chrome.alarms.create('radar-daily', {
+      when: nextRunTime(sch.hour || 9, sch.minute || 0),
+      periodInMinutes: 1440
+    });
+  } else {
+    chrome.alarms.clear('radar-daily');
+  }
+}
+
+chrome.runtime.onInstalled.addListener(() => { ensureRadarAlarm(); sbLoad(); resumeIfNeeded(); });
+chrome.runtime.onStartup.addListener(() => { ensureRadarAlarm(); sbLoad(); resumeIfNeeded(); });
+
+// SW 复活（非浏览器启动，onInstalled/onStartup 不触发）时，靠 alarm 兜底唤醒；
+// 这里额外做一次主动检查，确保存储里"running"的任务被续上
+function resumeIfNeeded() {
+  loadJob().then((j) => {
+    if (j && j.running && j.queue.length) { ensurePumpAlarm(); pumpJob(); }
+  });
+}
+
+chrome.alarms.onAlarm.addListener(async (a) => {
+  if (a.name === 'job-pump') { pumpJob(); return; }
+  if (a.name !== 'radar-daily') return;
+  const sch = await radarLoadSchedule();
+  const seeds = (sch.seeds && sch.seeds.length) ? sch.seeds : await loadSettingsSeeds();
+  if (!seeds.length) return;
+  try {
+    const res = await runSnapshot(seeds, sch.delay || 900);
+    if (res.ok && res.snap) {
+      const data = res.snap.data || {};
+      await historyPush({
+        id: 's' + res.snap.ts,
+        ts: Date.now(),
+        kind: '快照',
+        title: Object.keys(data).length + '种子·' + res.snap.date,
+        detail: Object.values(data).reduce((a, v) => a + (v ? v.length : 0), 0) + '词',
+        payload: { type: 'snapshot', data }
+      });
+    }
+    if (res.ok && res.diff && res.diff.newWords.length) {
+      broadcast({ type: 'radarDone', newCount: res.diff.newWords.length });
+    }
+  } catch (e) {}
+});
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'startBatch') {
-    if (job && job.running) {
-      sendResponse({ ok: false, error: '已有任务在运行，请先停止' });
-      return;
-    }
+    if (request.depth > 3) request.depth = 3; // 防御：深度封顶，避免队列失控
     startBatch(request.seeds, request.depth, request.delay);
     sendResponse({ ok: true });
     return;
   }
   if (request.action === 'stopBatch') {
-    if (job) job.stop = true;
+    stopBatch();
     sendResponse({ ok: true });
     return;
   }
   if (request.action === 'getState') {
-    if (job) {
-      sendResponse({
-        running: job.running,
-        done: job.done,
-        remaining: job.queue.length,
-        collected: job.results.length
-      });
-    } else {
-      sendResponse({ running: false });
-    }
+    loadJob().then((job) => {
+      if (job && job.running) {
+        sendResponse({
+          running: true,
+          done: job.done,
+          remaining: job.queue.length,
+          collected: job.results.length
+        });
+      } else {
+        sendResponse({ running: false });
+      }
+    });
     return true;
   }
   if (request.action === 'diagnose') {
@@ -299,6 +468,117 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       } catch (e) {
         sendResponse({ ok: false, error: String((e && e.message) || e) });
       }
+    })();
+    return true;
+  }
+  if (request.action === 'snapshotNow') {
+    (async () => {
+      const seeds = await loadSettingsSeeds();
+      if (!seeds.length) { sendResponse({ ok: false, error: '请先在采集页填种子词' }); return; }
+      sendResponse({ ok: true, started: true });
+      try {
+        const res = await runSnapshot(seeds, 900, (kw) => broadcast({ type: 'radarProgress', current: kw }));
+        if (res.ok && res.snap) {
+          const data = res.snap.data || {};
+          historyPush({
+            id: 's' + res.snap.ts,
+            ts: Date.now(),
+            kind: '快照',
+            title: Object.keys(data).length + '种子·' + res.snap.date,
+            detail: Object.values(data).reduce((a, v) => a + (v ? v.length : 0), 0) + '词',
+            payload: { type: 'snapshot', data }
+          });
+        }
+        broadcast({ type: 'radarDone', res });
+      } catch (e) {
+        broadcast({ type: 'radarDone', res: { ok: false, error: String((e && e.message) || e) } });
+      }
+    })();
+    return true;
+  }
+  if (request.action === 'getTrend') {
+    (async () => {
+      const snaps = await radarLoadSnapshots();
+      const scored = scoreWords(snaps);
+      const today = snaps[snaps.length - 1];
+      const prev = snaps.length >= 2 ? snaps[snaps.length - 2] : null;
+      const diff = diffSnapshots(today, prev);
+      const summary = snaps.map((s) => ({
+        date: s.date,
+        total: Object.values(s.data || {}).reduce((a, v) => a + (v ? v.length : 0), 0)
+      }));
+      sendResponse({ ok: true, summary, scored, diff });
+    })();
+    return true;
+  }
+  if (request.action === 'getSchedule') {
+    (async () => { sendResponse({ ok: true, schedule: await radarLoadSchedule() }); })();
+    return true;
+  }
+  if (request.action === 'setSchedule') {
+    (async () => {
+      await radarSaveSchedule(request.schedule);
+      await ensureRadarAlarm();
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+  // —— 账号登录 / 云同步 ——
+  if (request.action === 'sbGetSession') {
+    (async () => {
+      await sbLoad();
+      sendResponse({ ok: true, session: !!SB.session, user: SB.session ? (SB.session.user || { email: '已登录' }) : null });
+    })();
+    return true;
+  }
+  if (request.action === 'sbSignup') {
+    (async () => {
+      try { const d = await sbSignup(request.email, request.password); sendResponse({ ok: true, user: d.user || { email: request.email } }); }
+      catch (e) { sendResponse({ ok: false, error: String((e && e.message) || e) }); }
+    })();
+    return true;
+  }
+  if (request.action === 'sbLogin') {
+    (async () => {
+      try { const d = await sbLogin(request.email, request.password); sendResponse({ ok: true, user: d.user || { email: request.email } }); }
+      catch (e) { sendResponse({ ok: false, error: String((e && e.message) || e) }); }
+    })();
+    return true;
+  }
+  if (request.action === 'sbLogout') {
+    (async () => { await sbLogout(); sendResponse({ ok: true }); })();
+    return true;
+  }
+  // —— 历史记录 ——
+  if (request.action === 'getHistory') {
+    (async () => { sendResponse({ ok: true, history: await historyLoad() }); })();
+    return true;
+  }
+  if (request.action === 'syncHistory') {
+    (async () => {
+      const cloud = await sbPullHistory();
+      if (cloud && cloud.length) {
+        let local = await historyLoad();
+        const map = new Map(local.map((e) => [e.id, e]));
+        for (const c of cloud) {
+          if (!map.has(c.id)) local.push(c);
+        }
+        local.sort((a, b) => b.ts - a.ts);
+        if (local.length > 100) local = local.slice(0, 100);
+        await historySave(local);
+      }
+      sendResponse({ ok: true, pulled: cloud ? cloud.length : 0, history: await historyLoad() });
+    })();
+    return true;
+  }
+  if (request.action === 'clearHistory') {
+    (async () => { await historySave([]); sendResponse({ ok: true }); })();
+    return true;
+  }
+  if (request.action === 'deleteHistory') {
+    (async () => {
+      const deleted = await deleteHistory(request.id);
+      sendResponse({ ok: true, deleted });
     })();
     return true;
   }

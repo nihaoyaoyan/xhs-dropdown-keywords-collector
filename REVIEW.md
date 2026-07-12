@@ -30,12 +30,15 @@
 | 16 | 重开弹窗丢失"运行中"态 | storage 恢复 + `job.running` 检测 + 重连保活 |
 
 ## 残留风险（需使用者知晓）
-- **DOM 改版**：小红书改版可能使 `SELECTORS` 全失效。缓解：多选择器兜底；彻底失效时改 `content.js` 的 `SELECTORS`。
+- **DOM 改版**：小红书改版可能使 `SELECTORS` 全失效。缓解：多选择器兜底 + 主路径网络拦截（`inject.js` 截联想响应）；彻底失效时改 `content.js` 的 `SELECTORS`。
 - **合成输入不触发联想**：极端环境若小红书校验 `isTrusted` 或走 IME 组合事件，自动模式可能采空。缓解：内置「采集当前下拉」手动兜底。
-- **弹窗关闭 + 长任务**：keepalive 仅在弹窗打开时保活；关闭弹窗后 SW 仍可能被回收。缓解：限制 delay ≤15s、提示采集期间保持弹窗打开。彻底方案需迁至 offscreen document（未做，避免过度设计）。
-- **depth=3 队列规模**：递归 3 层可能产生数百~上千词，耗时较长。建议日常用 1–2 层。
-- **极大导出**：data URI 有长度上限，数万行 CSV 可能导出失败。建议分批或用 TXT。
-- **无图标**：工具栏显示默认拼图，仅美观问题。
+
+## v1.9 第一性原理修复（原残留风险已消灭）
+- **弹窗关闭 + 长任务：✅ 已消灭（根因是状态模型不可恢复）**
+  原 `job` 活 SW 内存里，`saveState` 只存摘要，SW 回收即队列全丢。v1.9 改为 `chrome.storage` 为唯一事实源（queue/visited/added 全序列化），步进式 `pumpJob` 每词落盘，靠 `chrome.alarms`('job-pump' 每 30s) 在 SW 死后/弹窗关闭/浏览器重启后续跑，无需 offscreen document。
+- **depth=3 队列规模：✅ 已消灭** — 递归队列硬上限 `QUEUE_CAP=3000`，触顶标记 `truncated` 并在历史里提示。
+- **极大导出失败：✅ 已消灭** — `download()` 改用 Blob URL（兜底 data URI）。
+- **无图标：✅ 已消灭** — 生成品牌色 (#FF2442) PNG 图标 16/48/128 并接入 manifest。
 - **activeTab 权限**：可进一步精简（content_scripts 已注入），当前保留无害。
 
 ## 不变量测试结果

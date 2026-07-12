@@ -1,17 +1,19 @@
 {
   "manifest_version": 3,
   "name": "小红书下拉词批量采集器",
-  "version": "1.5",
-  "description": "基于开源版增强：批量种子词、递归长尾挖掘、CSV/TXT 一键导出、网络拦截采集、本地保存。",
+  "version": "1.11",
+  "description": "基于开源版增强：批量采集、递归长尾、上升趋势雷达、全历史记录（含快照）、账号登录云同步、CSV/TXT 与历史导出。",
   "permissions": [
     "storage",
     "tabs",
     "activeTab",
     "downloads",
-    "scripting"
+    "scripting",
+    "alarms"
   ],
   "host_permissions": [
-    "*://*.xiaohongshu.com/*"
+    "*://*.xiaohongshu.com/*",
+    "*://*.supabase.co/*"
   ],
   "content_scripts": [
     {
@@ -31,8 +33,18 @@
   "background": {
     "service_worker": "background.js"
   },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "小红书下拉词批量采集器"
+    "default_title": "小红书下拉词批量采集器",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   }
 }

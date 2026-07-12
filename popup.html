@@ -8,18 +8,25 @@
     --fg:#1f1f1f;
     --muted:#8a8a8a;
     --border:#ececec;
+    --green:#0F6E56;
+    --amber:#BA7517;
   }
   *{box-sizing:border-box;}
   body{width:368px;margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--fg);background:#fff;}
   .wrap{padding:14px 16px 18px;}
   h1{font-size:15px;margin:0 0 2px;display:flex;align-items:center;gap:6px;}
   h1 .dot{width:8px;height:8px;border-radius:50%;background:var(--xhs-red);}
-  .sub{font-size:11px;color:var(--muted);margin:0 0 12px;}
+  .sub{font-size:11px;color:var(--muted);margin:0 0 10px;}
+  .tabs{display:flex;gap:6px;margin-bottom:10px;border-bottom:1px solid var(--border);}
+  .tab{flex:1;padding:8px;text-align:center;font-size:12px;font-weight:600;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;}
+  .tab.active{color:var(--xhs-red);border-bottom-color:var(--xhs-red);}
+  .panel{display:none;}
+  .panel.active{display:block;}
   label{font-size:12px;font-weight:600;display:block;margin:10px 0 4px;}
-  textarea{width:100%;height:88px;resize:vertical;border:1px solid var(--border);border-radius:8px;padding:8px;font-size:12px;line-height:1.5;outline:none;}
+  textarea{width:100%;height:84px;resize:vertical;border:1px solid var(--border);border-radius:8px;padding:8px;font-size:12px;line-height:1.5;outline:none;}
   textarea:focus{border-color:var(--xhs-red);}
   .row{display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap;}
-  select,input[type=number]{border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:12px;outline:none;}
+  select,input[type=number],input[type=time]{border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:12px;outline:none;}
   select:focus,input:focus{border-color:var(--xhs-red);}
   .btns{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;}
   button{flex:1;border:none;border-radius:8px;padding:9px 10px;font-size:13px;font-weight:600;cursor:pointer;transition:transform .08s ease,opacity .2s;}
@@ -37,50 +44,145 @@
   th,td{text-align:left;padding:5px 8px;border-bottom:1px solid #f2f2f2;}
   th{position:sticky;top:0;background:#fafafa;color:var(--muted);font-weight:600;}
   td.lv{color:var(--xhs-red);font-weight:600;width:32px;text-align:center;}
+  td.sc{color:var(--green);font-weight:600;width:42px;text-align:center;}
+  td.tag{width:34px;text-align:center;}
+  .tag-new{color:#fff;background:var(--xhs-red);border-radius:4px;padding:1px 4px;font-size:9px;}
+  .tag-keep{color:var(--muted);font-size:10px;}
   .empty{color:var(--muted);padding:14px;text-align:center;font-size:11px;}
   .foot{margin-top:12px;display:flex;gap:8px;}
   .hint{font-size:10px;color:var(--muted);margin-top:6px;line-height:1.5;}
+  .chip{display:inline-block;background:#FAECE7;color:#993C1D;border-radius:4px;padding:1px 6px;font-size:10px;margin:2px 4px 2px 0;}
+  .hist{display:flex;gap:3px;align-items:flex-end;height:34px;margin-top:6px;}
+  .hist i{flex:1;background:var(--xhs-red);opacity:.7;border-radius:2px 2px 0 0;min-width:6px;}
+  .hist span{font-size:9px;color:var(--muted);text-align:center;}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1><span class="dot"></span>小红书下拉词批量采集器</h1>
-  <p class="sub">批量种子词 · 递归长尾挖掘 · CSV/TXT 导出</p>
+  <h1><span class="dot"></span>小红书下拉词采集器</h1>
+  <p class="sub">批量采集 · 递归长尾 · 上升趋势雷达</p>
 
-  <label for="seeds">种子词（每行一个）</label>
-  <textarea id="seeds" placeholder="虾仁&#10;减脂餐&#10;一人食&#10;三文鱼"></textarea>
-
-  <div class="row">
-    <label style="margin:0;">递归层级</label>
-    <select id="depth">
-      <option value="1">1 层（仅种子）</option>
-      <option value="2" selected>2 层（种子 + 下钻）</option>
-      <option value="3">3 层（深度长尾）</option>
-    </select>
-    <label style="margin:0 0 0 4px;">间隔(ms)</label>
-    <input id="delay" type="number" value="900" min="300" max="15000" step="100" style="width:78px;">
+  <div class="tabs">
+    <div class="tab active" data-tab="collect">采集</div>
+    <div class="tab" data-tab="trend">趋势</div>
+    <div class="tab" data-tab="history">历史</div>
+    <div class="tab" data-tab="account">账号</div>
   </div>
 
-  <div class="btns">
-    <button id="start" class="btn-primary">▶ 开始采集</button>
-    <button id="stop" class="btn-ghost" style="display:none;">■ 停止</button>
-    <button id="current" class="btn-line">采集当前下拉</button>
+  <!-- 采集面板 -->
+  <div id="panelCollect" class="panel active">
+    <label for="seeds">种子词（每行一个）</label>
+    <textarea id="seeds" placeholder="虾仁&#10;减脂餐&#10;一人食&#10;三文鱼"></textarea>
+
+    <div class="row">
+      <label style="margin:0;">递归层级</label>
+      <select id="depth">
+        <option value="1">1 层（仅种子）</option>
+        <option value="2" selected>2 层（种子 + 下钻）</option>
+        <option value="3">3 层（深度长尾）</option>
+      </select>
+      <label style="margin:0 0 0 4px;">间隔(ms)</label>
+      <input id="delay" type="number" value="900" min="300" max="15000" step="100" style="width:78px;">
+    </div>
+
+    <div class="btns">
+      <button id="start" class="btn-primary">▶ 开始采集</button>
+      <button id="stop" class="btn-ghost" style="display:none;">■ 停止</button>
+      <button id="current" class="btn-line">采集当前下拉</button>
+    </div>
+
+    <div class="status" id="status">就绪。先打开小红书页面，再点开始。</div>
+    <div class="progress"><i id="bar"></i></div>
+
+    <div class="results" id="resultsBox">
+      <div class="empty">暂无数据</div>
+    </div>
+
+    <div class="foot">
+      <button id="exportCsv" class="btn-ghost">导出 CSV</button>
+      <button id="exportTxt" class="btn-ghost">导出 TXT</button>
+      <button id="diagnose" class="btn-line">诊断</button>
+      <button id="clear" class="btn-line">清空</button>
+    </div>
+    <p class="hint">建议间隔 ≥ 800ms；连续 5 次无词自动暂停。结果存本地。</p>
   </div>
 
-  <div class="status" id="status">就绪。先打开小红书页面，再点开始。</div>
-  <div class="progress"><i id="bar"></i></div>
+  <!-- 趋势雷达面板 -->
+  <div id="panelTrend" class="panel">
+    <label>定时快照</label>
+    <div class="row">
+      <label style="margin:0;"><input type="checkbox" id="schOn" style="vertical-align:middle;"> 每日</label>
+      <input id="schTime" type="time" value="09:00" style="width:90px;">
+      <button id="schSave" class="btn-line" style="flex:none;">保存</button>
+    </div>
+    <p class="hint">到点自动用上方种子词跑一遍 depth=1，存为当天快照。浏览器需开着。</p>
 
-  <div class="results" id="resultsBox">
-    <div class="empty">暂无数据</div>
+    <div class="btns">
+      <button id="snapNow" class="btn-primary">📷 立即快照</button>
+    </div>
+
+    <div class="status" id="trendStatus">点「立即快照」采集今天下拉词并对比昨天。</div>
+
+    <div style="margin-top:10px;">
+      <div style="font-size:12px;font-weight:600;margin-bottom:4px;">新增词 <span id="newCount" style="color:var(--xhs-red);">0</span></div>
+      <div id="newBox" style="max-height:90px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px;">
+        <div class="empty">—</div>
+      </div>
+    </div>
+
+    <div style="margin-top:10px;">
+      <div style="font-size:12px;font-weight:600;margin-bottom:4px;">上升分排序</div>
+      <div class="results" id="trendBox" style="max-height:150px;">
+        <div class="empty">暂无快照</div>
+      </div>
+    </div>
+
+    <div style="margin-top:10px;">
+      <div style="font-size:12px;font-weight:600;margin-bottom:2px;">近 7 日词量</div>
+      <div class="hist" id="hist"></div>
+    </div>
+
+    <div class="foot">
+      <button id="exportTrend" class="btn-ghost">导出趋势 CSV</button>
+      <button id="clearTrend" class="btn-line">清空快照</button>
+    </div>
   </div>
 
-  <div class="foot">
-    <button id="exportCsv" class="btn-ghost">导出 CSV</button>
-    <button id="exportTxt" class="btn-ghost">导出 TXT</button>
-    <button id="diagnose" class="btn-line">诊断</button>
-    <button id="clear" class="btn-line">清空</button>
+  <!-- 历史面板 -->
+  <div id="panelHistory" class="panel">
+    <div class="row" style="margin-top:0;">
+      <button id="syncHist" class="btn-line" style="flex:none;">从云端同步</button>
+      <button id="refreshHist" class="btn-line" style="flex:none;">刷新</button>
+      <button id="clearHist" class="btn-line" style="flex:none;">清空</button>
+    </div>
+    <div class="row" style="margin-top:8px;">
+      <button id="exportHist" class="btn-ghost" style="flex:1;">⬇ 导出历史 CSV</button>
+    </div>
+    <div class="status" id="histStatus">历史记录（采集批次 + 每日快照）</div>
+    <div class="results" id="histBox" style="max-height:260px;">
+      <div class="empty">暂无历史</div>
+    </div>
+    <div class="results" id="histDetail" style="max-height:180px;display:none;"></div>
   </div>
-  <p class="hint">建议间隔 ≥ 800ms；连续 5 次无词会自动暂停（防风控）。结果存本地。采集期间请保持弹窗打开以维持后台运行；若自动输入不触发下拉，可用「采集当前下拉」手动输入后采集。</p>
+
+  <!-- 账号面板 -->
+  <div id="panelAccount" class="panel">
+    <div id="acctAuth">
+      <label>邮箱</label>
+      <input id="sbEmail" type="email" placeholder="邮箱@example.com" style="width:100%;border:1px solid var(--border);border-radius:8px;padding:7px 8px;font-size:12px;">
+      <label>密码</label>
+      <input id="sbPass" type="password" placeholder="≥6 位" style="width:100%;border:1px solid var(--border);border-radius:8px;padding:7px 8px;font-size:12px;">
+      <div class="btns">
+        <button id="sbLoginBtn" class="btn-primary">登录</button>
+        <button id="sbSignupBtn" class="btn-ghost">注册</button>
+      </div>
+      <p class="hint" id="acctHint"></p>
+    </div>
+    <div id="acctInfo" style="display:none;">
+      <div class="status" id="acctStatus">已登录</div>
+      <div class="btns"><button id="sbLogoutBtn" class="btn-ghost">登出</button></div>
+    </div>
+  </div>
 </div>
 <script src="popup.js"></script>
 </body>
