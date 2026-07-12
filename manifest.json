@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "小红书下拉词批量采集器",
+  "version": "1.5",
+  "description": "基于开源版增强：批量种子词、递归长尾挖掘、CSV/TXT 一键导出、网络拦截采集、本地保存。",
+  "permissions": [
+    "storage",
+    "tabs",
+    "activeTab",
+    "downloads",
+    "scripting"
+  ],
+  "host_permissions": [
+    "*://*.xiaohongshu.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://*.xiaohongshu.com/*"],
+      "js": ["inject.js"],
+      "world": "MAIN",
+      "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "matches": ["*://*.xiaohongshu.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_end",
+      "all_frames": false
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "小红书下拉词批量采集器"
+  }
+}
