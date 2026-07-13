@@ -570,5 +570,84 @@ test('历史存储容量估算在 10MB 限额内', () => {
   assert.ok(totalMB < 10, '总存储应 < 10MB，实际约 ' + totalMB.toFixed(1) + 'MB');
 });
 
+console.log('[v1.13 第一性原理修复：递归下钻层级（修复"只采集1层"）]');
+
+// 模拟 pumpJob 中"处理一个词"的下钻分支。suggestions 是该词的下拉结果。
+// opts.useAdded=true：旧逻辑（误用 added 判断下钻，有 bug）；false：新逻辑（用 queued 判断）。
+function drill(oldJob, kw, level, suggestions, opts) {
+  const QUEUE_CAP = 3000;
+  const job = JSON.parse(JSON.stringify(oldJob)); // 深拷贝隔离状态
+  for (const w of suggestions) {
+    if (!job.added.includes(w)) {
+      job.added.push(w);
+      job.results.push({ seed: kw, level, word: w }); // 收集块（与真实代码一致）
+    }
+    const canDrill = opts.useAdded
+      ? (level < job.depth && !job.visited.includes(w) && !job.added.includes(w)) // 旧逻辑（bug）
+      : (level < job.depth && !job.queued.includes(w));                          // 新逻辑
+    if (canDrill) {
+      if (job.queue.length < QUEUE_CAP) {
+        job.queue.push({ kw: w, level: level + 1 });
+        if (!opts.useAdded) job.queued.push(w);
+      }
+    }
+  }
+  job.visited.push(kw);
+  job.done++;
+  return job;
+}
+
+// BUG 复现：旧逻辑下钻条件恒 false → 只能采种子层
+test('BUG复现：旧逻辑（误用 added）下钻不触发，只采种子层', () => {
+  let job = { depth: 3, queue: [{ kw: 'A', level: 1 }], visited: [], added: [], queued: [], results: [], done: 0 };
+  job = drill(job, 'A', 1, ['A1', 'A2'], { useAdded: true });
+  // 旧逻辑：A1/A2 不会被入队（下钻条件被 added 阻断），队列只剩种子 A 本身
+  assert.strictEqual(job.queue.length, 1, '旧逻辑：A1/A2 未入队，队列只剩种子 A');
+  assert.ok(job.results.every((r) => r.level === 1), '旧逻辑：所有结果都在第 1 层（即"只采集1层"）');
+});
+
+// 修复验证：新逻辑下钻触发，depth=3 采到 level 1/2/3
+test('修复后：新逻辑下钻触发，depth=3 采到 level 1/2/3', () => {
+  let job = { depth: 3, queue: [{ kw: 'A', level: 1 }], visited: [], added: [], queued: ['A'], results: [], done: 0 };
+  job = drill(job, 'A', 1, ['A1', 'A2'], { useAdded: false });
+  assert.strictEqual(job.queue.length, 3, '新逻辑：A1、A2 应入队（队列=处理中A + A1 + A2）');
+  job = drill(job, 'A1', 2, ['A11'], { useAdded: false });
+  job = drill(job, 'A2', 2, ['A21'], { useAdded: false });
+  job = drill(job, 'A11', 3, ['A111'], { useAdded: false });
+  job = drill(job, 'A21', 3, ['A211'], { useAdded: false });
+  const levels = job.results.map((r) => r.level);
+  assert.ok(levels.includes(1) && levels.includes(2) && levels.includes(3), '新逻辑：应采到 level 1/2/3');
+  assert.ok(!job.queue.some((q) => q.level === 4), '新逻辑：第 3 层不应再下钻（无 level 4）');
+});
+
+// 去重：同一词被多个父词下钻，只入队一次（queued 去重）
+test('修复后：同一词被多个父词下钻，只入队一次', () => {
+  let job = { depth: 3, queue: [{ kw: 'A', level: 1 }], visited: [], added: [], queued: ['A'], results: [], done: 0 };
+  job = drill(job, 'A', 1, ['X', 'Y'], { useAdded: false });
+  job = drill(job, 'X', 2, ['Z'], { useAdded: false });
+  job = drill(job, 'Y', 2, ['Z'], { useAdded: false }); // Z 已被 X 入队 → 不应重复
+  assert.strictEqual(job.queued.filter((w) => w === 'Z').length, 1, 'Z 只应入队一次');
+  assert.strictEqual(job.queue.filter((q) => q.kw === 'Z').length, 1, 'Z 只应在队列出现一次');
+});
+
+// 边界：depth=1 只采种子层
+test('修复后：depth=1 时只采种子层，不下钻', () => {
+  let job = { depth: 1, queue: [{ kw: 'A', level: 1 }], visited: [], added: [], queued: ['A'], results: [], done: 0 };
+  job = drill(job, 'A', 1, ['A1', 'A2'], { useAdded: false });
+  assert.strictEqual(job.queue.length, 1, 'depth=1：A1/A2 不应入队');
+  assert.ok(job.results.every((r) => r.level === 1), 'depth=1：所有结果都是第 1 层');
+});
+
+// 可恢复性：queued 随 job 持久化（saveJob 用 { results, ...state } 解构），SW 复活后继续下钻
+test('修复后：queued 随 job 持久化，SW 复活后能继续下钻', () => {
+  const job = { depth: 3, queue: [{ kw: 'A1', level: 2 }], queued: ['A', 'A1'], visited: ['A'], added: ['A1'], results: [], done: 1 };
+  const { results, ...state } = job;
+  assert.ok('queued' in state, 'queued 应随 state 一起持久化');
+  assert.deepStrictEqual(state.queued, ['A', 'A1'], '恢复后 queued 应完整');
+  const revived0 = JSON.parse(JSON.stringify(state)); revived0.results = results;
+  let revived = drill(revived0, 'A1', 2, ['A11'], { useAdded: false });
+  assert.strictEqual(revived.queue.some((q) => q.kw === 'A11'), true, '复活后应能继续下钻 A11');
+});
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

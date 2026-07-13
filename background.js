@@ -227,10 +227,14 @@ async function pumpJob() {
             job.results.push(entry);
             stepItems.push(entry);
           }
-          // 递归下钻：仅当未访问、未收集、且队列未触顶
-          if (item.level < job.depth && !job.visited.includes(w) && !job.added.includes(w)) {
+          // 递归下钻（第一性原理修复 v1.13）：
+          // 旧逻辑误用 job.added 作为「是否已入队」判断，但 w 已在上方收集块 push 进 added，
+          // 导致条件恒 false、下钻从不触发、只能采到种子层（"只采集1层"）。
+          // 现改用独立字段 job.queued 记录「已入队待下钻」词，与 added/visited 职责分离。
+          if (item.level < job.depth && !job.queued.includes(w)) {
             if (job.queue.length < QUEUE_CAP) {
               job.queue.push({ kw: w, level: item.level + 1 });
+              job.queued.push(w);
             } else if (!job.truncated) {
               job.truncated = true; // 标记截断，finalize 时提示
             }
@@ -321,6 +325,7 @@ async function startBatch(seeds, depth, delay) {
     delay: delay,
     tabId: null,
     queue: seeds.map((s) => ({ kw: s, level: 1 })),
+    queued: [...new Set(seeds)], // 已入队待下钻词集合：与 added(已收集)/visited(已处理) 职责分离，防重复入队撑爆队列
     visited: [],
     added: [],
     results: [],
