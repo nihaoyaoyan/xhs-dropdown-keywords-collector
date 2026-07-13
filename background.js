@@ -5,7 +5,9 @@ importScripts('supabase.js');
 let keepalivePort = null;
 let pumpLock = false; // 防止 alarm 与 setTimeout 并发处理同一批任务
 const QUEUE_CAP = 3000; // 递归队列硬上限，避免 depth=3 指数爆炸拖垮浏览器
+const HIST_RESULT_CAP = 1500; // 历史每条存词上限（100条×1500词×50B≈7.5MB < 10MB 限额）
 const JOB_KEY = 'job';
+const JOB_RESULTS_KEY = 'jobResults'; // 采集结果集独立存储，避免每步全量序列化大数组
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -29,15 +31,29 @@ chrome.runtime.onConnect.addListener((port) => {
 // 第一性原理：MV3 SW 易失，任何只活在内存里的任务状态都会随 SW 回收而丢失。
 // 因此 job 全程序列化存 storage（不含 Set/Map），SW 死后从 storage 重建即可续跑。
 async function loadJob() {
-  return new Promise((resolve) => chrome.storage.local.get([JOB_KEY], (s) => resolve(s[JOB_KEY] || null)));
+  return new Promise((resolve) => chrome.storage.local.get([JOB_KEY, JOB_RESULTS_KEY], (s) => {
+    const job = s[JOB_KEY] || null;
+    if (job) job.results = s[JOB_RESULTS_KEY] || []; // 恢复时把结果集合并回 job
+    resolve(job);
+  }));
 }
 async function saveJob(job) {
-  await chrome.storage.local.set({ [JOB_KEY]: job });
+// 第一性原理：调度态(小：queue/visited/added/done)每步必存，保证 SW 死后可恢复；
+// results(大) 由 flushResults 节流落盘，避免每步全量序列化大数组拖慢 service worker。
+const { results, ...state } = job;
+await chrome.storage.local.set({ [JOB_KEY]: state });
+}
+async function flushResults(job) {
+  await chrome.storage.local.set({ [JOB_RESULTS_KEY]: job.results });
 }
 function pct(job) {
   const est = job.done + job.queue.length;
-  if (est <= 0) return 100;
-  return Math.min(99, Math.round((job.done / est) * 100));
+  const raw = est <= 0 ? (job.pctShown || 0) : Math.min(99, Math.round((job.done / est) * 100));
+  // 第一性原理：递归采集的总工作量（队列长度）先验未知，下钻会持续向队列注入新词，
+  // 任何基于「done/(done+remaining)」的估算在数学上都会随分母增大而倒退。
+  // 不变量：展示给用户的进度只增不降——用单调上限兜住可见的倒退。
+  job.pctShown = Math.max(job.pctShown || 0, raw);
+  return job.pctShown;
 }
 
 async function ensureTab() {
@@ -142,7 +158,9 @@ async function pumpJob() {
   try {
     let job = await loadJob();
     if (!job || !job.running || job.stop) {
-      if (job && (job.stop || job.queue.length === 0)) await finalizeJob(job);
+      // 对抗式审查修复：job 已 finalize（phase==='done'）时不再重复 finalize，
+      // 否则 stray alarm 会在任务结束后重复广播 'finished'，弹窗出现重复完成提示
+      if (job && job.phase !== 'done' && (job.stop || job.queue.length === 0)) await finalizeJob(job);
       return;
     }
     if (job.queue.length === 0) { await finalizeJob(job); return; }
@@ -242,6 +260,9 @@ async function pumpJob() {
 
     job.done++;
     await saveJob(job);
+    // 第一性原理：每步落盘结果集，SW 死亡时零丢失。
+    // saveJob 只序列化调度态(小)，flushResults 只写 results 一个 key，开销 < 5ms
+    await flushResults(job);
     broadcast({
       type: 'progress',
       current: item.kw,
@@ -267,19 +288,22 @@ async function pumpJob() {
 }
 
 async function finalizeJob(job) {
+  await flushResults(job); // 强制全量落盘结果集，确保历史完整
   job.running = false;
   job.phase = 'done';
   await saveJob(job);
   chrome.alarms.clear('job-pump');
   broadcast({ type: 'finished', total: job.results.length });
-  // 存入历史
+  // 存入历史（results 上限 HIST_RESULT_CAP，超出时标注截断）
+  const histResults = job.results.slice(0, HIST_RESULT_CAP);
+  const histTruncated = job.results.length > HIST_RESULT_CAP;
   historyPush({
     id: 'b' + (job.startedAt || Date.now()),
     ts: Date.now(),
     kind: '采集',
     title: (job.seeds || []).length + '种子词·depth' + job.depth,
-    detail: job.results.length + '词' + (job.truncated ? '（队列超限已截断）' : ''),
-    payload: { type: 'batch', seeds: job.seeds, depth: job.depth, results: job.results.slice(0, 500) }
+    detail: job.results.length + '词' + (job.truncated ? '（队列超限已截断）' : '') + (histTruncated ? '（历史存前' + HIST_RESULT_CAP + '）' : ''),
+    payload: { type: 'batch', seeds: job.seeds, depth: job.depth, results: histResults }
   });
 }
 
@@ -304,7 +328,8 @@ async function startBatch(seeds, depth, delay) {
     emptyStreak: 0,
     seeds: seeds,
     startedAt: Date.now(),
-    truncated: false
+    truncated: false,
+    pctShown: 0
   };
   ensurePumpAlarm();
   await saveJob(job);

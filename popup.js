@@ -179,8 +179,9 @@ currentBtn.addEventListener('click', async () => {
     setStatus('⚠️ 请先切到小红书页面，并在搜索框输入、展开下拉');
     return;
   }
-  setStatus('正在读取当前下拉框…');
-  chrome.tabs.sendMessage(tab.id, { action: 'collectCurrent' }, (resp) => {
+  const firstSeed = (seedsEl.value.split('\n').map((s) => s.trim()).find(Boolean)) || '';
+  setStatus('正在读取当前下拉框…' + (firstSeed ? '（页面无下拉时会自动输入「' + firstSeed + '」触发）' : ''));
+  chrome.tabs.sendMessage(tab.id, { action: 'collectCurrent', keyword: firstSeed }, (resp) => {
     if (chrome.runtime.lastError || !resp || !resp.ok) {
       setStatus('⚠️ 读取失败：' + ((resp && resp.error) || '页面未就绪'));
       return;
@@ -286,6 +287,23 @@ $('exportTxt').addEventListener('click', () => {
     return;
   }
   download('xhs_dropdown_' + ts() + '.txt', uniqueWords().join('\n'), 'text/plain;charset=utf-8');
+});
+
+$('copyWords').addEventListener('click', () => {
+  if (!results.length) {
+    setStatus('暂无数据可复制');
+    return;
+  }
+  const words = uniqueWords();
+  const text = words.join('\n');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => setStatus('✅ 已复制 ' + words.length + ' 个去重词到剪贴板'),
+      () => setStatus('⚠️ 复制失败，请检查浏览器剪贴板权限')
+    );
+  } else {
+    setStatus('⚠️ 当前环境不支持剪贴板，请改用「导出 TXT」');
+  }
 });
 
 $('clear').addEventListener('click', () => {

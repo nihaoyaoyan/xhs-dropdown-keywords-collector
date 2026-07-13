@@ -213,8 +213,19 @@
     return { ok: true, keyword, suggestions: filtered, source, rawSample, captureUrl: cap ? cap.url : '' };
   }
 
-  async function collectCurrent() {
-    const dom = await waitForSuggestionsDOM(2000);
+  async function collectCurrent(keyword) {
+    // 主路径：直接读已展开的下拉（用户在页面已输入）
+    let dom = await waitForSuggestionsDOM(2000);
+    // 兜底：页面无下拉时，自动用页面已有输入或种子词触发联想，再读，降低手动门槛
+    if (!dom.length) {
+      const input = findInput();
+      const cur = input ? (input.value || '').trim() : '';
+      const kw = cur || keyword;
+      if (kw && input) {
+        await typeInto(input, kw);
+        dom = await waitForSuggestionsDOM(3000);
+      }
+    }
     return { ok: true, suggestions: dom };
   }
 
@@ -258,7 +269,7 @@
       return true;
     }
     if (request.action === 'collectCurrent') {
-      collectCurrent()
+      collectCurrent(request.keyword)
         .then(sendResponse)
         .catch((e) => sendResponse({ ok: false, error: String((e && e.message) || e) }));
       return true;
