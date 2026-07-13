@@ -278,7 +278,7 @@ $('exportCsv').addEventListener('click', () => {
     setStatus('暂无数据可导出');
     return;
   }
-  download('xhs_dropdown_' + ts() + '.csv', buildCsv(), 'text/csv;charset=utf-8');
+  download('小红书下拉词_' + ts() + '.csv', buildCsv(), 'text/csv;charset=utf-8');
 });
 
 $('exportTxt').addEventListener('click', () => {
@@ -286,7 +286,7 @@ $('exportTxt').addEventListener('click', () => {
     setStatus('暂无数据可导出');
     return;
   }
-  download('xhs_dropdown_' + ts() + '.txt', uniqueWords().join('\n'), 'text/plain;charset=utf-8');
+  download('小红书下拉词_' + ts() + '.txt', uniqueWords().join('\n'), 'text/plain;charset=utf-8');
 });
 
 $('copyWords').addEventListener('click', () => {
@@ -439,7 +439,7 @@ $('exportTrend').addEventListener('click', () => {
   for (const s of lastTrend.scored) {
     csv += `${csvCell(s.word)},${csvCell(s.seed)},${s.pos},${s.days},${s.isNew ? '是' : '否'},${s.score}\n`;
   }
-  download('xhs_trend_' + ts() + '.csv', '\uFEFF' + csv, 'text/csv;charset=utf-8');
+  download('上升趋势雷达_' + ts() + '.csv', '\uFEFF' + csv, 'text/csv;charset=utf-8');
 });
 
 $('clearTrend').addEventListener('click', () => {
@@ -546,7 +546,7 @@ $('exportHist').addEventListener('click', () => {
     if (!hist.length) { histStatus.textContent = '暂无历史可导出，先去采集或快照'; return; }
     const rows = expandHistoryRows(hist);
     const wordCount = rows.filter((r) => r[3] !== '' || r[5] !== '').length;
-    download('xhs_history_' + ts() + '.csv', buildHistoryCsv(hist), 'text/csv;charset=utf-8');
+    download('历史记录_' + ts() + '.csv', buildHistoryCsv(hist), 'text/csv;charset=utf-8');
     histStatus.textContent = `✅ 已导出 ${hist.length} 条历史（展开 ${wordCount} 个下拉词）`;
   });
 });
