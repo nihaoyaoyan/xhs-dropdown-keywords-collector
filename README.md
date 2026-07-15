@@ -1,6 +1,6 @@
-# 小红书下拉词批量采集器（增强版）
+# 红书选词助手
 
-基于开源项目 [chenyaoswu/xiaohongshu-search-keywords-collector](https://github.com/chenyaoswu/xiaohongshu-search-keywords-collector) 的 DOM 选择器重写增强。原版只能采集"当前已展开的下拉词"并复制到剪贴板；本版补齐了**批量种子词、递归长尾挖掘、CSV/TXT 导出、本地保存**。
+红书选词助手是一款运行于 Chrome / Edge 浏览器的扩展，用于在小红书搜索框自动采集下拉联想词、递归挖掘长尾词，并通过趋势雷达捕捉上升词机会。
 
 ## 功能
 - **批量种子词**：一次粘贴多个核心词（每行一个），自动依次查询。
@@ -20,7 +20,7 @@
 > 定时依赖 `chrome.alarms`，需浏览器处于运行状态；快照最多保留 30 天。
 
 ## 安装（Chrome / Edge 均支持）
-1. 下载本文件夹（或 `git clone` 原仓库后替换文件）。
+1. 下载本文件夹。
 2. 打开浏览器扩展管理页：
    - Chrome：`chrome://extensions`
    - Edge：`edge://extensions`
