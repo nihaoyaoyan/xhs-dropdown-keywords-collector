@@ -401,6 +401,111 @@
   </div>
 </div>
 
-<script src="popup.js"></script>
+
+<script>
+(function(){
+  document.querySelectorAll('.tab').forEach(function(t){
+    t.addEventListener('click', function(){
+      document.querySelectorAll('.tab').forEach(function(x){x.classList.remove('active');});
+      document.querySelectorAll('.panel').forEach(function(x){x.classList.remove('active');});
+      t.classList.add('active');
+      var name = t.dataset.tab.charAt(0).toUpperCase() + t.dataset.tab.slice(1);
+      document.getElementById('panel'+name).classList.add('active');
+      if(t.dataset.tab==='trend') renderTrend();
+      if(t.dataset.tab==='history') renderHistory();
+    });
+  });
+  function esc(s){return String(s).replace(/[&<>"']/g,function(c){return({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]);});}
+
+  var results = [
+    {seed:'虾仁',level:1,word:'虾仁 减脂'},
+    {seed:'虾仁',level:1,word:'虾仁 宝宝'},
+    {seed:'虾仁',level:1,word:'虾仁 做法'},
+    {seed:'减脂餐',level:1,word:'减脂餐 一周'},
+    {seed:'减脂餐',level:1,word:'减脂餐 便当'},
+    {seed:'一人食',level:1,word:'一人食 晚餐'},
+    {seed:'三文鱼',level:1,word:'三文鱼 减脂'},
+    {seed:'虾仁',level:2,word:'虾仁 减脂 快手'},
+    {seed:'虾仁',level:2,word:'虾仁 减脂 懒人'}
+  ];
+  function renderResults(){
+    var box=document.getElementById('resultsBox');
+    if(!results.length){box.innerHTML='<div class="empty">暂无数据</div>';return;}
+    var rows='';
+    for(var i=results.length-1;i>=Math.max(0,results.length-500);i--){
+      var r=results[i];
+      rows+='<tr><td class="lv">'+r.level+'</td><td>'+esc(r.seed)+'</td><td>'+esc(r.word)+'</td></tr>';
+    }
+    box.innerHTML='<table><thead><tr><th>层</th><th>种子词</th><th>下拉词</th></tr></thead><tbody>'+rows+'</tbody></table>';
+  }
+  renderResults();
+
+  var newWords=[{word:'虾仁 减脂 快手'},{word:'减脂餐 便当 一周'},{word:'三文鱼 减脂 早餐'}];
+  var scored=[
+    {seed:'虾仁',word:'虾仁 减脂 快手',pos:1,days:3,isNew:true,score:62},
+    {seed:'虾仁',word:'虾仁 减脂 懒人',pos:2,days:2,isNew:true,score:58},
+    {seed:'减脂餐',word:'减脂餐 便当',pos:1,days:5,isNew:false,score:54},
+    {seed:'三文鱼',word:'三文鱼 减脂',pos:1,days:4,isNew:false,score:50}
+  ];
+  var summary=[{date:'07-09',total:120},{date:'07-10',total:138},{date:'07-11',total:131},{date:'07-12',total:155},{date:'07-13',total:169},{date:'07-14',total:162},{date:'07-15',total:184}];
+  function renderTrend(){
+    document.getElementById('newCount').textContent=newWords.length;
+    document.getElementById('newBox').innerHTML = newWords.length
+      ? newWords.map(function(w){return '<span class="chip">'+esc(w.word)+'</span>';}).join('')
+      : '<div class="empty">今日无新增</div>';
+    var tb=document.getElementById('trendBox');
+    if(!scored.length){tb.innerHTML='<div class="empty">暂无快照</div>';}
+    else{
+      var rows='';
+      scored.forEach(function(s){
+        var tag=s.isNew?'<span class="tag-new">新</span>':'<span class="tag-keep">·</span>';
+        rows+='<tr><td class="tag">'+tag+'</td><td>'+esc(s.seed)+'</td><td>'+esc(s.word)+'</td><td class="sc">'+s.score+'</td></tr>';
+      });
+      tb.innerHTML='<table><thead><tr><th></th><th>种子</th><th>下拉词</th><th>分</th></tr></thead><tbody>'+rows+'</tbody></table>';
+    }
+    var histEl=document.getElementById('hist');
+    var max=Math.max.apply(null,summary.map(function(x){return x.total;}));
+    histEl.innerHTML=summary.map(function(x){
+      var h=Math.round(x.total/max*34);
+      return '<div style="display:flex;flex-direction:column;flex:1;align-items:center;"><i style="height:'+h+'px;"></i><span>'+x.date.slice(5)+'</span></div>';
+    }).join('');
+    document.getElementById('trendStatus').innerHTML='今日新增 <span class="k">'+newWords.length+'</span> 个下拉词';
+  }
+  function renderTrendInit(){renderTrend();}
+
+  var hist=[
+    {id:'b1',ts:Date.now()-3600e3*5,kind:'采集',title:'3种子词·depth2',detail:'9 词',payload:{type:'batch',results:results}},
+    {id:'s1',ts:Date.now()-3600e3*20,kind:'快照',title:'每日快照 07-15',detail:'184 词',payload:{type:'snapshot',data:{'虾仁':['虾仁 减脂','虾仁 宝宝']}}}
+  ];
+  function fmt(ts){var d=new Date(ts);var p=function(n){return String(n).padStart(2,'0');};return (d.getMonth()+1)+'/'+d.getDate()+' '+p(d.getHours())+':'+p(d.getMinutes());}
+  function renderHistory(){
+    var box=document.getElementById('histBox');
+    if(!hist.length){box.innerHTML='<div class="empty">暂无历史</div>';return;}
+    var rows='';
+    hist.forEach(function(e){
+      rows+='<tr data-id="'+e.id+'"><td>'+fmt(e.ts)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.title)+'</td><td>'+esc(e.detail)+'</td></tr>';
+    });
+    box.innerHTML='<table><thead><tr><th>时间</th><th>类型</th><th>概要</th><th>结果</th></tr></thead><tbody>'+rows+'</tbody></table>';
+    box.querySelectorAll('tr[data-id]').forEach(function(tr){
+      tr.addEventListener('click',function(){showDetail(tr.dataset.id);});
+    });
+  }
+  function showDetail(id){
+    var e=hist.find(function(x){return x.id===id;});if(!e)return;
+    var html='<div style="padding:10px 12px;font-size:12px;"><b>'+esc(e.kind)+' · '+esc(e.title)+'</b>（'+fmt(e.ts)+'）';
+    var p=e.payload||{};
+    if(p.type==='batch'&&p.results){
+      html+='<br>共 '+p.results.length+' 词：<br>'+p.results.slice(0,30).map(function(r){return '<span class="chip">'+esc(r.word)+'</span>';}).join('');
+    }else if(p.newWords){
+      html+='<br>新增 '+p.newWords.length+' 词：<br>'+p.newWords.slice(0,20).map(function(w){return '<span class="chip">'+esc(w.word||w)+'</span>';}).join('');
+    }
+    html+='<div style="margin-top:10px;"><button class="btn-line" onclick="this.closest(\'.results\').style.display=\'none\'">🗑 删除这条</button></div></div>';
+    var d=document.getElementById('histDetail');
+    d.style.display='block';d.innerHTML=html;
+  }
+  renderHistory();
+})();
+</script>
+
 </body>
 </html>
