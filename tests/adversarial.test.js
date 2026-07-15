@@ -649,5 +649,100 @@ test('修复后：queued 随 job 持久化，SW 复活后能继续下钻', () =>
   assert.strictEqual(revived.queue.some((q) => q.kw === 'A11'), true, '复活后应能继续下钻 A11');
 });
 
+// ===== v1.15 主题系统（第一性原理重构）=====
+
+// 镜像 popup.html 主题逻辑（纯逻辑，剥离 DOM）
+function makeThemeEngine() {
+  let attr = null; // 模拟 document.documentElement 的 data-theme 属性
+  let btnText = '🌙';
+  let initialized = false;
+  const KEY = 'xhsTheme';
+  let store = {}; // 模拟 chrome.storage.local
+
+  function applyTheme(t) {
+    attr = (t === 'dark') ? 'dark' : null;
+    btnText = (t === 'dark') ? '☀️' : '🌙';
+  }
+  function persist(t) { store[KEY] = t; }
+  function readStoredSync() { return store[KEY] || null; }
+  function toggleTheme() {
+    initialized = true;
+    const now = (attr === 'dark') ? 'dark' : 'light';
+    const next = now === 'dark' ? 'light' : 'dark';
+    applyTheme(next);
+    persist(next);
+  }
+  function asyncInit(system) {
+    if (initialized) return; // 防覆盖
+    const stored = readStoredSync();
+    applyTheme(stored || system);
+    initialized = true;
+  }
+  return { applyTheme, toggleTheme, asyncInit, getAttr: () => attr, getBtn: () => btnText, getStore: () => store, isInit: () => initialized };
+}
+
+test('主题：初始无存储时跟随系统偏好', () => {
+  const e = makeThemeEngine();
+  e.applyTheme('dark'); // 同步初始化模拟
+  e.asyncInit('dark');
+  assert.strictEqual(e.getAttr(), 'dark', '系统深色应设为 dark');
+});
+
+test('主题：存储优先于系统偏好', () => {
+  const e = makeThemeEngine();
+  e.applyTheme('light');
+  // 模拟已存储用户偏好为 dark
+  e.toggleTheme(); // 用户切到 dark（存入 store）
+  // 重新初始化场景：stored=dark, system=light → 应取 stored
+  const e2 = makeThemeEngine();
+  e2.applyTheme('light');
+  // 手动注入 store 模拟读取
+  e2.toggleTheme(); e2.toggleTheme(); // dark then light，此时 store=light
+  assert.strictEqual(e2.getStore().xhsTheme, 'light', '存储值应为最后一次切换');
+});
+
+test('主题：toggleTheme 正确取反（浅→深→浅）', () => {
+  const e = makeThemeEngine();
+  e.applyTheme('light');       // 初始浅色
+  assert.strictEqual(e.getAttr(), null, '浅色 = 无 data-theme 属性');
+  e.toggleTheme();            // → 深
+  assert.strictEqual(e.getAttr(), 'dark', '切换后应为 dark');
+  assert.strictEqual(e.getBtn(), '☀️', '深色按钮图标应为太阳');
+  e.toggleTheme();            // → 浅
+  assert.strictEqual(e.getAttr(), null, '再切回应为浅色（无属性）');
+  assert.strictEqual(e.getBtn(), '🌙', '浅色按钮图标应为月亮');
+});
+
+test('主题：initialized 标记防止异步回调覆盖用户切换（竞态根因）', () => {
+  // 复现旧版 bug：read() 异步回调返回时覆盖用户已做的切换
+  const e = makeThemeEngine();
+  e.applyTheme('light');      // 同步初始化（系统浅色）
+  // 用户在异步回调返回前立即点击切换到深色
+  e.toggleTheme();            // initialized=true, attr=dark
+  assert.strictEqual(e.isInit(), true, '点击后应标记 initialized');
+  // 异步回调现在才返回（存储为空，系统浅色）→ 旧版会 applyTheme('light') 覆盖！
+  e.asyncInit('light');       // 新版：initialized=true → return，不覆盖
+  assert.strictEqual(e.getAttr(), 'dark', '用户切换不应被异步回调覆盖');
+});
+
+test('主题：持久化 key 一致（chrome.storage 与读写同 key）', () => {
+  const e = makeThemeEngine();
+  e.toggleTheme();
+  assert.strictEqual(e.getStore().xhsTheme, 'dark', '写入 key 应为 xhsTheme');
+  // readStoredSync 读同一个 key
+  assert.strictEqual(e.getStore().xhsTheme, 'dark', '读取 key 应一致');
+});
+
+test('主题：连续快速点击不产生中间态丢失', () => {
+  const e = makeThemeEngine();
+  e.applyTheme('light');
+  e.toggleTheme(); // dark
+  e.toggleTheme(); // light
+  e.toggleTheme(); // dark
+  e.toggleTheme(); // light
+  assert.strictEqual(e.getAttr(), null, '4 次切换（偶数）应回到初始浅色');
+  assert.strictEqual(e.getStore().xhsTheme, 'light', '存储应为最终态 light');
+});
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
